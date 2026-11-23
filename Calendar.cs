@@ -241,6 +241,7 @@ class CalendarApp : Form {
             clockTimer.Stop();
             wheelRemainder = 0;
             rangeStart = rangeEnd = null;
+            UpdateRange();
         };
         MaximizeBox = false;
         ShowInTaskbar = false;
@@ -283,6 +284,9 @@ class CalendarApp : Form {
         rangeDates = AddLabel(16, 546 + TodoHeight, 350, 24, 10);
         rangeDates.ForeColor = Color.Silver;
         rangeTotals = AddLabel(16, 572 + TodoHeight, 421, 46, 11);
+        rangeDates.BackColor = rangeTotals.BackColor = Color.Black;
+        rangeDates.Hide();
+        rangeTotals.Hide();
         clockHook = HandleClockClick;
         UpdateTodos();
         PositionWindow();
@@ -449,6 +453,12 @@ class CalendarApp : Form {
 
     protected override void OnPaint(PaintEventArgs e) {
         base.OnPaint(e);
+        const int borderWidth = 5;
+        ControlPaint.DrawBorder(e.Graphics, ClientRectangle,
+            Color.Red, borderWidth, ButtonBorderStyle.Solid,
+            Color.Red, borderWidth, ButtonBorderStyle.Solid,
+            Color.Red, borderWidth, ButtonBorderStyle.Solid,
+            Color.Red, borderWidth, ButtonBorderStyle.Solid);
         if (!rangeStart.HasValue || !rangeEnd.HasValue) return;
         using (var band = new SolidBrush(DayCell.RangeFill)) {
             for (int i = 0; i < cells.Length - 1; i++) {
@@ -627,10 +637,18 @@ class CalendarApp : Form {
 
     void UpdateRange() {
         if (!rangeStart.HasValue) {
+            rangeDates.Hide();
+            rangeTotals.Hide();
             rangeDates.Text = "";
             rangeTotals.Text = "";
             return;
         }
+        SetRangeSummary();
+        rangeDates.Show();
+        rangeTotals.Show();
+    }
+
+    void SetRangeSummary() {
         DateTime start = rangeStart.Value;
         if (!rangeEnd.HasValue) {
             rangeDates.Text = "开始  " + start.ToString("yyyy-MM-dd");

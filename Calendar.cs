@@ -153,7 +153,6 @@ class CalendarApp : Form {
     readonly System.Windows.Forms.Timer clockTimer = new System.Windows.Forms.Timer { Interval = 250 };
     DateTime displayedDate = DateTime.Today;
     readonly ToolTip tips = new ToolTip();
-    readonly NotifyIcon tray;
     readonly string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RestWorkCalendar");
     readonly Dictionary<int, Dictionary<string, Holiday>> schedules = new Dictionary<int, Dictionary<string, Holiday>>();
     readonly HashSet<int> loading = new HashSet<int>();
@@ -180,7 +179,6 @@ class CalendarApp : Form {
     }
     readonly ChineseLunisolarCalendar lunar = new ChineseLunisolarCalendar();
     readonly string[] lunarDays = "初一 初二 初三 初四 初五 初六 初七 初八 初九 初十 十一 十二 十三 十四 十五 十六 十七 十八 十九 二十 廿一 廿二 廿三 廿四 廿五 廿六 廿七 廿八 廿九 三十".Split(' ');
-    bool exiting;
     delegate IntPtr MouseHook(int code, IntPtr message, IntPtr data);
     readonly MouseHook clockHook;
     IntPtr hookHandle;
@@ -208,13 +206,19 @@ class CalendarApp : Form {
     static extern IntPtr GetModuleHandle(string name);
 
     [STAThread]
-    static void Main() {
+    static void Main(string[] args) {
         bool first;
         using (var mutex = new Mutex(true, @"Local\RestWorkCalendar", out first)) {
             if (!first) return;
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new CalendarApp());
+            bool background = Array.IndexOf(args, "--background") >= 0;
+            using (var window = new CalendarApp())
+            using (var context = new ApplicationContext()) {
+                if (!window.Start(background)) return;
+                window.FormClosed += (s,e) => context.ExitThread();
+                Application.Run(context);
+            }
         }
     }
 
@@ -230,7 +234,11 @@ class CalendarApp : Form {
         KeyDown += (s,e) => { if (e.KeyCode == Keys.Escape) Hide(); };
         Deactivate += (s,e) => { if (!editingTodo) Hide(); };
         VisibleChanged += (s,e) => {
-            if (Visible) return;
+            if (Visible) {
+                clockTimer.Start();
+                return;
+            }
+            clockTimer.Stop();
             wheelRemainder = 0;
             rangeStart = rangeEnd = null;
         };
@@ -275,36 +283,30 @@ class CalendarApp : Form {
         rangeDates = AddLabel(16, 546 + TodoHeight, 350, 24, 10);
         rangeDates.ForeColor = Color.Silver;
         rangeTotals = AddLabel(16, 572 + TodoHeight, 421, 46, 11);
-        var menu = new ContextMenuStrip();
-        menu.Items.Add("打开日历", null, (s,e) => OpenCalendar());
-        menu.Items.Add("退出", null, (s,e) => { exiting = true; Close(); });
-        tray = new NotifyIcon { Icon = SystemIcons.Information, Text = Text, Visible = true, ContextMenuStrip = menu };
-        tray.MouseClick += (s,e) => {
-            if (e.Button == MouseButtons.Left) {
-                if (Visible && ContainsFocus) Hide(); else OpenCalendar();
-            }
-        };
-        FormClosing += (s,e) => {
-            if (!exiting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
-        };
         clockHook = HandleClockClick;
-        FormClosed += (s,e) => {
-            if (hookHandle != IntPtr.Zero) UnhookWindowsHookEx(hookHandle);
-            tray.Visible = false;
-            tray.Dispose();
-            tips.Dispose();
-            clockTimer.Dispose();
-        };
-        Shown += (s,e) => {
-            hookHandle = SetWindowsHookEx(14, clockHook, GetModuleHandle(null), 0);
-            if (hookHandle == IntPtr.Zero)
-                MessageBox.Show(this, "无法接入任务栏时钟，仍可从托盘图标打开。", Text);
-            RenderMonth();
-            UpdateClock();
-            clockTimer.Start();
-        };
         UpdateTodos();
         PositionWindow();
+    }
+
+    bool Start(bool background) {
+        // Create the message target for the mouse hook without showing the form.
+        IntPtr window = Handle;
+        hookHandle = SetWindowsHookEx(14, clockHook, GetModuleHandle(null), 0);
+        if (background) return hookHandle != IntPtr.Zero;
+        OpenCalendar();
+        return true;
+    }
+
+    protected override void Dispose(bool disposing) {
+        if (disposing) {
+            if (hookHandle != IntPtr.Zero) {
+                UnhookWindowsHookEx(hookHandle);
+                hookHandle = IntPtr.Zero;
+            }
+            tips.Dispose();
+            clockTimer.Dispose();
+        }
+        base.Dispose(disposing);
     }
 
     IntPtr HandleClockClick(int code, IntPtr message, IntPtr data) {
@@ -363,7 +365,6 @@ class CalendarApp : Form {
         RenderMonth();
     }
     void UpdateClock() {
-        if (!Visible) return;
         DateTime now = DateTime.Now;
         clock.Text = now.ToString("yyyy'年'M'月'd'日' HH:mm:ss ddd", CultureInfo.GetCultureInfo("zh-CN"));
         if (displayedDate != now.Date) {
@@ -387,11 +388,11 @@ class CalendarApp : Form {
     void OpenCalendar() {
         PositionWindow();
         WindowState = FormWindowState.Normal;
+        RenderMonth();
+        UpdateClock();
         Show();
         BringToFront();
         Activate();
-        UpdateClock();
-        RenderMonth();
     }
     Label AddLabel(int x, int y, int w, int h, int size) {
         var label = new Label { Bounds = new Rectangle(x,y,w,h), Font = new Font(Font.FontFamily,size),
@@ -443,7 +444,6 @@ class CalendarApp : Form {
         }
         foreach (int year in VisibleYears()) Fetch(year);
         UpdateRange();
-        UpdateStatus();
         Invalidate();
     }
 
@@ -657,18 +657,9 @@ class CalendarApp : Form {
         rangeTotals.Text = string.Format("共 {0} 天   工作日 {1} 天   休息日 {2} 天", count, count - rest, rest)
             + (missing ? "\n部分调休数据缺失，按周一至周五估算" : "");
     }
-    void UpdateStatus() {
-        var messages = new List<string>();
-        foreach (int year in VisibleYears()) {
-            if (loading.Contains(year)) messages.Add(year + " 正在同步");
-            else if (failed.Contains(year)) messages.Add(year + (schedules.ContainsKey(year) ? " 已用缓存" : " 暂无数据"));
-        }
-        tray.Text = messages.Count == 0 ? Text : Text + " · " + string.Join(" · ", messages);
-    }
     async void Fetch(int year) {
         if (loading.Contains(year) || schedules.ContainsKey(year) || failed.Contains(year)) return;
         loading.Add(year);
-        UpdateStatus();
         string path = Path.Combine(folder, year + ".json");
         try {
             schedules[year] = await Task.Run(() => {
